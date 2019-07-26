@@ -16,6 +16,8 @@ from configs.configs_factory import configs_factory
 from model.model_factory import model_factory
 from datasets.dataset_factory import dataset_factory
 
+np.set_printoptions(threshold=np.inf)
+parser = argparse.ArgumentParser()
 configs = None
 
 # tf.flags.DEFINE_integer()
@@ -29,7 +31,7 @@ def train_one_epoch(dataset, base_model, optimizer, preprocessing_type, saver,
     for image, gt_bboxes, gt_labels in tqdm(dataset):
         gt_bboxes = tf.squeeze(gt_bboxes, axis=0)
         coordinates = tf.split(gt_bboxes, 4, axis=1)
-        gt_bboxes = tf.concat([coordinates[1], coordinates[0], coordinates[3], coordinates[0]], axis=1)
+        gt_bboxes = tf.concat([coordinates[1], coordinates[0], coordinates[3], coordinates[2]], axis=1)
 
         gt_labels = tf.cast(tf.squeeze(gt_labels, axis=0), tf.int32)
         with tf.GradientTape() as tape:
@@ -57,7 +59,7 @@ def train_one_epoch(dataset, base_model, optimizer, preprocessing_type, saver,
             optimizer.apply_gradients(zip(gradients, all_variables), global_step=tf.train.get_or_create_global_step())
 
         # loss summary
-        if index % summary_every_n_steps:
+        if index % summary_every_n_steps == 0:
             tf.summary.scalar('l2_loss', l2_loss)
             tf.summary.scalar('rpn_cls_loss', rpn_cls_loss)
             tf.summary.scalar('rpn_reg_loss', rpn_reg_loss)
@@ -66,28 +68,28 @@ def train_one_epoch(dataset, base_model, optimizer, preprocessing_type, saver,
             tf.summary.scalar('total_loss', total_loss)
 
         # image summary
-        pred_bboxes, pred_lables, pred_scores = base_model(image, False)
-        if pred_bboxes is not None:
-            pred_image_index = tf.where(pred_scores >= configs['show_image_score_threshold'])
-            if tf.size(pred_image_index) != 0:
-                # show ground truth
-                gt_coordinates = tf.split(gt_bboxes, 4, axis=1)
-                show_gt_bboxes = tf.concat([gt_coordinates[1], gt_coordinates[0], gt_coordinates[3], gt_coordinates[2]], axis=1)
-                gt_image = show_image(tf.squeeze(image, axis=0).numpy(), show_gt_bboxes.numpy(), pred_lables.numpy,
-                                    preprocessing_type=preprocessing_type, caffe_pixel_means=configs['bgr_pixel_means'],
-                                    enable_matplotlib=False)
+        # pred_bboxes, pred_lables, pred_scores = base_model(image, False)
+        # if pred_bboxes is not None:
+        #     pred_image_index = tf.where(pred_scores >= configs['show_image_score_threshold'])
+        #     if tf.size(pred_image_index) != 0:
+        #         # show ground truth
+        #         gt_coordinates = tf.split(gt_bboxes, 4, axis=1)
+        #         show_gt_bboxes = tf.concat([gt_coordinates[1], gt_coordinates[0], gt_coordinates[3], gt_coordinates[2]], axis=1)
+        #         gt_image = show_image(tf.squeeze(image, axis=0).numpy(), show_gt_bboxes.numpy(), pred_lables.numpy,
+        #                             preprocessing_type=preprocessing_type, caffe_pixel_means=configs['bgr_pixel_means'],
+        #                             enable_matplotlib=False)
                 
-                tf.summary.image('gt_image', tf.expand_dims(gt_image, axis=0))
+        #         tf.summary.image('gt_image', tf.expand_dims(gt_image, axis=0))
 
-                # show pred
-                pred_bboxes = tf.gather(pred_bboxes, pred_image_index)
-                pred_labels = tf.gather(pred_labels, pred_image_index)
-                pred_coordinates = tf.split(pred_bboxes, 4, axis=1)
-                show_pred_bboxes = tf.concat([pred_coordinates[1], pred_coordinates[0], pred_coordinates[3], pred_coordinates[2]], axis=1)
-                pred_image = show_image(tf.squeeze(image, axis=0).numpy(), show_pred_bboxes.numpy(), pred_labels.numpy(),
-                                        preprocessing_type=preprocessing_type, caffe_pixel_means=configs['bgr_pixel_means'],
-                                        enable_matplotlib=False)
-                tf.summary.image('pred_image', tf.expand_dims(pred_image, axis=0))
+        #         # show pred
+        #         pred_bboxes = tf.gather(pred_bboxes, pred_image_index)
+        #         pred_labels = tf.gather(pred_labels, pred_image_index)
+        #         pred_coordinates = tf.split(pred_bboxes, 4, axis=1)
+        #         show_pred_bboxes = tf.concat([pred_coordinates[1], pred_coordinates[0], pred_coordinates[3], pred_coordinates[2]], axis=1)
+        #         pred_image = show_image(tf.squeeze(image, axis=0).numpy(), show_pred_bboxes.numpy(), pred_labels.numpy(),
+        #                                 preprocessing_type=preprocessing_type, caffe_pixel_means=configs['bgr_pixel_means'],
+        #                                 enable_matplotlib=False)
+        #         tf.summary.image('pred_image', tf.expand_dims(pred_image, axis=0))
 
         # logging
         if index % logging_every_n_steps == 0:
@@ -95,7 +97,8 @@ def train_one_epoch(dataset, base_model, optimizer, preprocessing_type, saver,
                 show_learning_rate = optimizer._lr()
             else:
                 show_learning_rate = optimizer._learning_rate()
-            tf.logging.info('steps %d, lr: %.5f, loss: %.4f, %.4f, %.4f, %.4f, %.4f' % 
+        
+        tf.compat.v1.logging.info('steps %d, lr: %.5f\nloss: rpn_cls_loss: %.4f,  rpn_reg_loss: %.4f,  roi_cls_loss: %.4f,  roi_reg_loss: %.4f\ntotal_loss: %.4f' % 
                         (index + 1, show_learning_rate, rpn_cls_loss, rpn_reg_loss, roi_cls_loss, roi_reg_loss, total_loss))
 
         # save
@@ -103,8 +106,6 @@ def train_one_epoch(dataset, base_model, optimizer, preprocessing_type, saver,
             saver.save(os.path.join(save_path, 'model.ckpt'), global_step=tf.train.get_or_create_global_step())
 
         index += 1
-
-
 
 
 def train(training_dataset, preprocessing_type, base_model, optimizer, summary_dir,
@@ -124,7 +125,7 @@ def train(training_dataset, preprocessing_type, base_model, optimizer, summary_d
     # writer = tf.summary.FileWriter(train_dir, flush_secs=100)
     writer = summary.create_file_writer(summary_dir, flush_millis=100000)
     for i in range(configs['epoches']):
-        tf.logging.info('epoch %d starting...' % (i + 1))
+        tf.compat.v1.logging.info('epoch %d starting...' % (i + 1))
         start_time = time.time()
         with writer.as_default(), summary.always_record_summaries():
             train_one_epoch(dataset=training_dataset, base_model=base_model, optimizer=optimizer, preprocessing_type=preprocessing_type,
@@ -132,14 +133,14 @@ def train(training_dataset, preprocessing_type, base_model, optimizer, summary_d
                         save_path=ckpt_dir, saver=saver, save_every_n_steps=save_every_n_steps)
         tf.set_random_seed(1)
         end_time = time.time()
-        tf.logging.info('epoch %d training finished, costing %d seconds...' % (i, end_time - start_time))
+        tf.compat.v1.logging.info('epoch %d training finished, costing %d seconds...' % (i, end_time - start_time))
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='training')
     parser.add_argument('--gpu_id', default='0', type=str, help='used in sys variable CUDA_VISIBLE_DEVICES.')
     parser.add_argument('--model_class', default='faster_rcnn', type=str, help='one of [faster_rcnn, fpn].')
-    parser.add_argument('--backbone', default='vgg16', type=str, help='one of [vgg16, resnet50, resnet101, resnet152].')
+    parser.add_argument('--backbone', default='resnet50', type=str, help='one of [vgg16, resnet50, resnet101, resnet152].')
     
     parser.add_argument('--data_root_path', default='tfrecords/', type=str)
     parser.add_argument('--dataset_class', default='pascalvoc', type=str, help='one of [pascalvoc, coco].')
@@ -198,7 +199,7 @@ def main(args):
     configs = configs_factory(args.dataset_class, args.model_class)
 
     os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu_id)
-    config = tf.ConfigProto(allow_soft_placement=True)
+    config = tf.compat.v1.ConfigProto(allow_soft_placement=True)
     config.gpu_options.allow_growth = True
     tf.enable_eager_execution(config=config)
 

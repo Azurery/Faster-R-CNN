@@ -5,10 +5,10 @@ class roi_pooling_creator(tf.keras.Model):
     
     def __init__(self, roi_pooling_size, roi_pooling_max_pooling=True):
         super().__init__()
-        self.pooling_size = roi_pooling_size
-        self.roi_pooling_max_pooling = roi_pooling_max_pooling
-        self.concat = Concatenate(axis=0)
-        self.max_pooling = MaxPooling2D(padding='same')
+        self._roi_pooling_size = roi_pooling_size
+        self._roi_pooling_max_pooling = roi_pooling_max_pooling
+        # self._concat = Concatenate(axis=0)
+        self._max_pooling = MaxPooling2D(padding='same') 
 
     
     def call(self, inputs, training=None):
@@ -48,22 +48,44 @@ class roi_pooling_creator(tf.keras.Model):
                             proposal_channels[3] / tf.cast(h, dtype=tf.float32),
                             proposal_channels[2] / tf.cast(w, dtype=tf.float32)], axis=1)
 
-        if self.roi_pooling_max_pooling:
-            before_pooling_size = self.pooling_size * 2
+        if self._roi_pooling_max_pooling:
+            before_pooling_size = self._roi_pooling_size * 2
 
             # 【注】feature_maps 是需要参与反向传播的，但 bboxes 不需要参加
             # 现在如果我不加上 `tf.stop_gradient(bboxes)`
 
             # 投入的是 tensor，那么肯定不止一张图片啦，`box_ind` 这个参数就是为了索引用的。
             crops = tf.image.crop_and_resize(feature_maps, boxes=bboxes,
-                                                           box_ind=bbox_indices,
-                                                           crop_size=[before_pooling_size, before_pooling_size],
-                                                           name='crops')
-            return self.max_pooling(crops)
+                                                            box_ind=bbox_indices,
+                                                            crop_size=[before_pooling_size, before_pooling_size],
+                                                            name='crops')
+            return self._max_pooling(crops)
         else:
-            crops = tf.image.crop_and_resize(feature_maps, bboxes=bbox_indices,
-                                                          box_ind=bbox_indices,
-                                                          crop_size=[self.pooling_size, self.pooling_size],
-                                                          name='crops')
+            crops = tf.image.crop_and_resize(feature_maps, boxes=bboxes,
+                                                            box_ind=bbox_indices,
+                                                            crop_size=[self._roi_pooling_size, self._roi_pooling_size],
+                                                            name='crops')
             return crops
 
+class roi_pooling_fpn_creator(tf.keras.Model):
+    def __init__(self, roi_pooling_size):
+        super().__init__()
+        self._roi_pooling_size = roi_pooling_size
+        self._max_pooling = MaxPooling2D(padding='same')
+
+    def call(self, inputs, training=None):
+        feature_maps, proposals, image_shape = inputs
+        h, w = tf.cast(image_shape[0], dtype=tf.float32), tf.cast(image_shape[1], dtype=tf.float32)
+        
+        bbox_indices = tf.zeros([tf.shape(proposals)[0]], dtype=tf.int32)
+        proposal_channels = tf.split(proposals, 4, axis=1)
+        # 个人感觉有问题
+        bboxes = tf.concat([proposal_channels[1] / tf.cast(h, dtype=tf.float32),
+                            proposal_channels[0] / tf.cast(w, dtype=tf.float32),
+                            proposal_channels[3] / tf.cast(h, dtype=tf.float32),
+                            proposal_channels[2] / tf.cast(w, dtype=tf.float32)], axis=1)
+        
+        before_pooling_size = self._roi_pooling_size * 2
+        crops = tf.image.crop_and_resize(feature_maps, boxes=bboxes, crop_size=[before_pooling_size, before_pooling_size],
+                                        box_ind=bbox_indices, name='crops_resnet')
+        return self._max_pooling(crops)

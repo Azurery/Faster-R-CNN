@@ -1,7 +1,8 @@
 import tensorflow as tf
+import numpy as np
 from utils.bbox_utils import encode_bboxes, decode_bboxes, clip_bboxes, filter_overlap_bboxes, pairwise_iou
-from keras.layers import Conv2D
 from keras.regularizers import l2
+layers = tf.keras.layers
 
 class rpn_head_creator(tf.keras.Model):
 	'''
@@ -9,7 +10,7 @@ class rpn_head_creator(tf.keras.Model):
 					|
 					|
 			  3 * 3 conv, 512
-			        |
+					|
 					|
 			-----------------------
 			|					  |
@@ -28,25 +29,27 @@ class rpn_head_creator(tf.keras.Model):
 	def __init__(self, num_anchors, weight_decay):
 		super().__init__()
 		self._num_anchors = num_anchors
-		self._rpn_conv = Conv2D(512, [3, 3], 
-								padding='same',
+		self._rpn_conv = layers.Conv2D(512, [3, 3], 
+								padding='same', activation='relu',
 								kernel_initializer=tf.random_normal_initializer(0, 0.01),
 								kernel_regularizer=l2(weight_decay), 
 								name='rpn_conv1')
 
-		self._rpn_score_conv = Conv2D(self._num_anchors * 2, [1, 1], 
+		self._rpn_score_conv = layers.Conv2D(self._num_anchors * 2, [1, 1], 
+									activation=None, padding='valid',
 									kernel_initializer=tf.random_normal_initializer(0, 0.01),
 									kernel_regularizer=l2(weight_decay), 
 									name='rpn_score_conv')
 		
-		self._rpn_coordinate_conv = Conv2D(self._num_anchors * 4, [1, 1],
+		self._rpn_coordinate_conv = layers.Conv2D(self._num_anchors * 4, [1, 1],
+										activation=None, padding='valid',
 										kernel_initializer=tf.random_normal_initializer(0, 0.01),
 										kernel_regularizer=l2(weight_decay),
 										name='rpn_coordinate_conv')
 	
-	def call(self, features):
+	def call(self, features, training=None):
 		# 先进行一个 `3*3` conv
-		rpn_conv1 = self._rpn_conv(features)
+		x = self._rpn_conv(features)
 
 		'''
 		`rpn_socres` shape：`[H * W * 18]`
@@ -56,35 +59,12 @@ class rpn_head_creator(tf.keras.Model):
 		由于 TF 中的数据形式为 `[N, H, W, C]`，所以需要将 `C` 这个维度进行划分，即
 		`[H * W * 18]` ---> `[H * W, 18]` ---> `[H * W, 9, 2]`
 		'''
-		rpn_scores = self._rpn_score_conv(rpn_conv1)
+		rpn_scores = self._rpn_score_conv(x)
 		
 		# `[H * W * 18]` ---> `[H * W, 18]`
 		rpn_scores = tf.reshape(rpn_scores, [-1, self._num_anchors * 2])
-		
-		# `[H * W, 18]` ---> `[H * W, 2, 9]`
-		rpn_scores = tf.reshape(rpn_scores, [-1, 2, self._num_anchors])
 
-		# `[H * W, 2, 9]` ---> `[H * W, 9, 2]`
-		rpn_scores = tf.transpose(rpn_scores, [0, 2, 1])
-		
-		# `[H * W, 9, 2]` ---> `[H * W * 9, 2]`
-		rpn_scores = tf.reshape(rpn_scores, [-1, 2])
-
-		#  ---> `[H * W * 9, 2]`
-		rpn_scores = tf.nn.softmax(rpn_scores)
-		rpn_scores = tf.reshape(rpn_scores, [-1, self._num_anchors, 2])
-
-		# `[H * W * 9, 2]`---> `[H * W, 2, 9]`
-		rpn_scores = tf.transpose(rpn_scores, [0, 2, 1])
-		
-		# `[H * W, 2, 9]`---> `[H * W, 18]`
-		rpn_scores = tf.reshape(rpn_scores, [-1, 2 * self._num_anchors])
-
-		# `[H * W, 18]`---> `[H * W * 18]`
-		# 这个操作骚啊，没看懂
-		rpn_scores = tf.reshape(rpn_scores[:, self._num_anchors:], [-1])
-
-		rpn_coordinates = self._rpn_coordinate_conv(rpn_conv1)
+		rpn_coordinates = self._rpn_coordinate_conv(x)
 		rpn_coordinates = tf.reshape(rpn_coordinates, [-1, 4])
 		
 		return rpn_scores, rpn_coordinates
@@ -143,7 +123,7 @@ class rpn_proposals_creator(tf.keras.Model):
 														max_output_size=num_nms_bbox,
 														iou_threshold=self.nms_threshold)
 		selected_bboxes = tf.gather(decoded_bboxes, selected_indices)
-		tf.logging.info('RPN net generates %d proposals' % tf.size(selected_indices))
+		tf.logging.info('rpn net generates %d proposals' % tf.size(selected_indices))
 
 		# 由于 `selected_bboxes` 不参与 training，则可以不让其进行 BP
 		return tf.stop_gradient(selected_bboxes)
@@ -171,17 +151,17 @@ class rpn_target_anchors_createor(tf.keras.Model):
 		self.max_positive_samples = max_positive_samples
 
 	
-	def call(self, features, training=None):
+	def call(self, inputs, training=None):
 
-		gt_bboxes, image_shape, anchors = features
+		gt_bboxes, image_shape, anchors = inputs
 		# 因为 `anchors` 的 shape 为：`[num_anchors, 4]` 
 		# 下面这么做的目的是为了得到总的 anchors 数量
 		num_anchors = anchors.get_shape().as_list()[0]
 
 		# 1. 首先对 anchors 进行 filter，筛选符合边界要求的 anchors，之后的所有操作都是基于帅选后的结果
-		tf.logging.info('Before filtering, the number of target anchors are %d' % anchors.shape[0])
+		tf.logging.info('before filtering, there are %d target anchors.' % anchors.shape[0])
 		filtered_indicies, anchors = filter_overlap_bboxes(anchors, image_shape)
-		tf.logging.info('After filtering, the number of target anchors are %d' % anchors.shape[0])
+		tf.logging.info('after filtering, there are %d target anchors.' % anchors.shape[0])
 
 		labels, anchor_max_iou_indices, positive_indices = self._create_label(anchors, gt_bboxes)
 
@@ -279,6 +259,7 @@ class rpn_target_anchors_createor(tf.keras.Model):
 		# `anchors` 的 shape 为：`[num_anchors, 4]` 。
 		# 注：一个 anchor 只能对应一个 gt box，但一个 gt box 可以对应多个 anchor
 		# `labels` 这个 tensor 中存储的是每个 anchor 与 对应 gt box 的最大 IoU 值
+		# labels = tf.negative(tf.ones((anchors.shape[0],), tf.int32))
 		labels = tf.negative(tf.ones((anchors.shape[0],), tf.int32))
 		
 		'''
@@ -286,7 +267,6 @@ class rpn_target_anchors_createor(tf.keras.Model):
 			`iou` 的 shape：`[M, N]`
 		'''
 		iou = pairwise_iou(anchors, gt_bboxes)
-
 		
 		# 找出 某一个 anchor 与所有 gt_bboxes IoU 中最大的一个
 		# 因为 `iou` 的 shape 为 `[M, N]`，为一个二维数组，则 `iou` 中的每一行就代表某一个 anchor 与 所有 `N` 个
@@ -299,13 +279,13 @@ class rpn_target_anchors_createor(tf.keras.Model):
 
 		# FIXME：个人觉得这一步没有必要
 		# # 所以，`gt_max_iou` 就是找到每一个 gt_bbox 与所有 anchors 最大的 IoU
-		# gt_max_iou = tf.reduce_max(iou, axis=0)
+		gt_max_iou = tf.reduce_max(iou, axis=0)
 
 		# # 找出 某一个 gt_bbox 与所有 anchors IoU 中最大的一个
 		# # 因为 `iou` 的 shape 为 `[M, N]`，为一个二维数组，则 `iou` 中的每一列就代表与某一个 gt_bbox 相交的 `M` 个
 		# # anchors 的 IoU。这就需要找到 `iou` 每一列中的最大值
 
-		# gt_max_iou_indices = tf.where(tf.equal(iou, gt_max_iou))[:, 0]
+		gt_max_iou_indices = tf.where(tf.equal(iou, gt_max_iou))[:, 0]
 
 		'''
 		- 与 gt_bboxes 的 `max_iou > 0.7` 的 anchor为正样本----positive
@@ -315,19 +295,19 @@ class rpn_target_anchors_createor(tf.keras.Model):
 		- positive_iou_threshold=.7,
 		- negative_iou_threshold=.3
 		'''
-		negative_labels = anchor_max_iou < self.negative_iou_threshold
-		positive_labels = anchor_max_iou >= self.positive_iou_threshold
+		negative_mask = anchor_max_iou < self.negative_iou_threshold
+		positive_mask = anchor_max_iou >= self.positive_iou_threshold
 
 		# 得到 negative 的位置
-		labels = tf.where(negative_labels, tf.zeros_like(labels), labels)
+		labels = tf.where(negative_mask, tf.zeros_like(labels), labels)
 
 		# 个人觉得这一步也没有必要
-		# labels = tf.scatter_update(tf.Variable(labels), gt_max_iou_indices, 1)
+		labels = tf.scatter_update(tf.Variable(labels), gt_max_iou_indices, 1)	
+
+		# 得到 positive 的位置
+		labels = tf.where(positive_mask, tf.ones_like(labels), labels)
 
 		negative_indices = tf.where(tf.equal(labels, 0))[:, 0]
-		
-		# 得到 positive 的位置
-		labels = tf.where(positive_labels, tf.ones_like(labels), labels)
 		positive_indices = tf.where(tf.equal(labels, 1))[:, 0]
 
 		'''
@@ -342,8 +322,8 @@ class rpn_target_anchors_createor(tf.keras.Model):
 		if tf.size(positive_indices) > self.max_positive_samples:
 			# FIXME：没有对 IoU 进行排序？
 			positive_indices = tf.random_shuffle(positive_indices)
-			positive_indices = positive_indices[ :self.max_positive_samples]
 			unuseful_indices = positive_indices[self.max_positive_samples: ]
+			positive_indices = positive_indices[ :self.max_positive_samples]
 			# 主要是用于更新 `labels`，使得 `labels` 中的 unuseful 设置为 `-1`
 			labels = tf.scatter_update(tf.Variable(labels), unuseful_indices, -1)
 
@@ -360,11 +340,11 @@ class rpn_target_anchors_createor(tf.keras.Model):
 
 		if tf.size(negative_indices) > num_negative:
 			negative_indices = tf.random_shuffle(negative_indices)
-			negative_indices = negative_indices[ :num_negative]
 			unuseful_indices = negative_indices[num_negative: ]
+			negative_indices = negative_indices[ :num_negative]
 			labels = tf.scatter_update(tf.Variable(labels), unuseful_indices, -1)
 
-		tf.logging.info('target generate %d positive and %d negative.' % (tf.size(positive_indices), tf.size(negative_indices)))
+		tf.logging.info('rpn_target_anchors_createor generate %d fgs and %d bgs.' % (tf.size(positive_indices), tf.size(negative_indices)))
 
 		return labels, anchor_max_iou_indices, positive_indices
 
@@ -421,6 +401,8 @@ class roi_target_proposals_createor(tf.keras.Model):
 		# 计算IoU
 		iou = pairwise_iou(proposals, gt_bboxes)
 		proposal_max_iou = tf.reduce_max(iou, axis=1)
+		# print(proposal_max_iou)
+
 		proposal_max_iou_indices = tf.argmax(iou, axis=1)
 
 		# labels = tf.zeros((proposals.shape[0],), dtype=tf.int32)
@@ -429,24 +411,26 @@ class roi_target_proposals_createor(tf.keras.Model):
 
 		# 获取 negative 和 positive
 		positive_indices = tf.where(proposal_max_iou >= self._positive_iou_threshold)[:, 0]
-		# negative_indices = tf.where(tf.logical_and(proposal_max_iou < self.positive_iou_threshold,
-		# 										proposal_max_iou >= self.negative_iou_threshold))[:, 0]
-		negative_indices = tf.where(proposal_max_iou < self._positive_iou_threshold)[:, 0]
+		negative_indices = tf.where(tf.logical_and(proposal_max_iou < self._positive_iou_threshold,
+												proposal_max_iou >= self._negative_iou_threshold))[:, 0]
 
+		tf.logging.info('before roi_target_proposals_createor generates %d fgs and %d bgs.' % (tf.size(positive_indices), tf.size(negative_indices)))
 
 		# 因为 positive 和 negative 的数量可能过多，所以需要筛选出特定数量的 positive 和 negative
 		if tf.size(positive_indices) > self._max_positive_samples:
 			positive_indices = tf.random_shuffle(positive_indices)[ :self._max_positive_samples]
 
 		if tf.size(negative_indices) > (self._num_samples - tf.size(positive_indices)):
-			negative_incides = tf.random_shuffle(negative_indices)[ :(self._num_samples - tf.size(positive_indices))]
+			negative_indices = tf.random_shuffle(negative_indices)[ :(self._num_samples - tf.size(positive_indices))]
 		elif tf.size(negative_indices) == (self._num_samples - tf.size(positive_indices)):
 			pass
 		else:
+			# target_size = (self._num_samples - tf.size(positive_indices)).numpy()
+			# negative_indices = np.random.choice(negative_indices.numpy(), size=int(target_size), replace=True)
 			pass
 
 		
-		tf.logging.info('rpn_target_proposals_createor generates %d positive and %d negative.' % (tf.size(positive_indices), tf.size(negative_indices)))
+		tf.logging.info('after roi_target_proposals_createor generates %d fgs and %d bgs.' % (tf.size(positive_indices), tf.size(negative_indices)))
 
 		# 因为 `positive_indices` 和 `negative_indices` 都是二维数组，数组的第 0 个维度代表一个坐标，第 1 个维度代表具体的坐标
 		# 例如，positive_indices = [[1, 2],
@@ -470,7 +454,7 @@ class roi_target_proposals_createor(tf.keras.Model):
 		final_roi_labels = tf.gather(labels, final_roi_indices)
 
 		final_roi_labels = tf.scatter_update(tf.Variable(final_roi_labels), 
-											tf.range(tf.size(negative_indices), 
+											tf.range(tf.size(positive_indices), 
 													tf.size(final_roi_indices), dtype=tf.int32), 0)
 		# final_roi_labels = tf.where(negative_indices, tf.zeros_like(final_roi_labels), final_roi_labels)
 
@@ -480,7 +464,7 @@ class roi_target_proposals_createor(tf.keras.Model):
 		# 这部分不理解
 		if tf.size(positive_indices) > 0:
 			w_in = w_in.numpy()
-			for index, positive_indices in enumerate(positive_indices.numpy()):
+			for index, positive_index in enumerate(positive_indices.numpy()):
 				w_in[index, labels[index]] = 1
 		
 		'''
@@ -507,7 +491,7 @@ class roi_target_proposals_createor(tf.keras.Model):
                                                         tf.gather(gt_bboxes, tf.gather(proposal_max_iou_indices, positive_indices)))
 			final_target_bboxes = final_target_bboxes.numpy()
 			target_bboxes = target_bboxes.numpy()
-			for index, positive_index in enumerate(positive_indices):
+			for index, positive_index in enumerate(positive_indices.numpy()):
 				final_target_bboxes[index, labels[index]] = target_bboxes[index]
 
 		final_target_bboxes = tf.reshape(final_target_bboxes, [-1, self._num_classes * 4])
@@ -519,9 +503,73 @@ class roi_target_proposals_createor(tf.keras.Model):
 				tf.stop_gradient(final_target_bboxes), \
                 tf.stop_gradient(w_in),\
 				tf.stop_gradient(w_out)
-# import tensorflow as tf
 
-# a = tf.Variable([1, 2, 3, 4], dtype=tf.int32)
-# with tf.Session() as sess:
-# 	sess.run(tf.global_variables_initializer())
-# 	print(tf.size(a).numpy())
+	# def call(self, inputs, training=None):
+	# 	rois, gt_bboxes, gt_labels = inputs
+	# 	iou = pairwise_iou(rois, gt_bboxes)
+	# 	max_overlaps = tf.reduce_max(iou, axis=1)  # [rois_size, ]
+	# 	gt_assignment = tf.argmax(iou, axis=1)  # [rois_size, ]
+	# 	labels = tf.gather(gt_labels, gt_assignment)  # [rois_size, ]
+
+    #     # 根据条件获取 前景 背景
+	# 	fg_inds = tf.where(max_overlaps >= self._positive_iou_threshold)[:, 0]
+	# 	bg_inds = tf.where(tf.logical_and(max_overlaps < self._positive_iou_threshold,
+    #                                       max_overlaps >= self._negative_iou_threshold))[:, 0]
+
+    #     # 筛选 前景/背景
+	# 	if tf.size(fg_inds) > self._max_positive_samples:
+	# 		fg_inds = tf.random_shuffle(fg_inds)[:self._max_positive_samples]
+	# 	if tf.size(bg_inds) > self._num_samples - tf.size(fg_inds):
+    #         # 如果bg sample的数量多于要求值，则随机筛选
+	# 		bg_inds = tf.random_shuffle(bg_inds)[:(self._num_samples - tf.size(fg_inds))]
+	# 	elif tf.size(bg_inds).numpy() == (self._num_samples - tf.size(fg_inds)).numpy():
+	# 		pass
+	# 	else:
+    #         # 如果bg sample的数量少于要求数值，则重复获取
+	# 		target_size = (self._num_samples - tf.size(fg_inds)).numpy()
+	# 		bg_inds = np.random.choice(bg_inds.numpy(), size=int(target_size), replace=True)
+
+	# 	tf.logging.info('roi_target_proposals_createor generates %d fgs and %d bgs.' % (tf.size(fg_inds), tf.size(bg_inds)))
+
+	# 	keep_inds = tf.concat([fg_inds, bg_inds], axis=0)
+	# 	final_rois = tf.gather(rois, keep_inds)  # rois[keep_inds]
+	# 	final_labels = tf.gather(labels, keep_inds)  # labels[keep_inds]
+    #     # labels[fg_inds_size:] = 0
+	# 	final_labels = tf.scatter_update(tf.Variable(final_labels),
+    #                                      tf.range(tf.size(fg_inds), tf.size(keep_inds), dtype=tf.int32), 0)
+
+    #     # inside weights 只有正例才会设置，其他均为0
+	# 	bbox_inside_weights = tf.zeros((tf.size(keep_inds), self._num_classes, 4), dtype=tf.float32)
+	# 	if tf.size(fg_inds) > 0:
+    #         # memory leak bug for tf.scatter_nd_update
+    #         # https://github.com/tensorflow/tensorflow/issues/27288
+    #         # cur_index = tf.stack([tf.range(tf.size(fg_inds)), tf.gather(labels, fg_inds)], axis=1)
+    #         # bbox_inside_weights = tf.scatter_nd_update(tf.Variable(bbox_inside_weights),
+    #         #                                            cur_index,
+    #         #                                            tf.ones([tf.size(fg_inds), 4]))
+	# 		bbox_inside_weights = bbox_inside_weights.numpy()
+	# 		for idx, fg_ind in enumerate(fg_inds.numpy()):
+	# 			bbox_inside_weights[idx, labels[idx]] = 1
+	# 	bbox_inside_weights = tf.reshape(bbox_inside_weights, [-1, self._num_classes * 4])
+
+    #     # final bbox target 只有正例才会设置，其他均为0
+	# 	final_bbox_targets = tf.zeros((tf.size(keep_inds), self._num_classes, 4), dtype=tf.float32)
+	# 	if tf.size(fg_inds) > 0:
+	# 		bbox_targets = encode_bboxes(tf.gather(final_rois, tf.range(tf.size(fg_inds))),
+    #                                                      tf.gather(gt_bboxes, tf.gather(gt_assignment, fg_inds)))
+    #         # memory leak bug for tf.scatter_nd_update
+    #         # https://github.com/tensorflow/tensorflow/issues/27288
+    #         # final_bbox_targets = tf.scatter_nd_update(tf.Variable(final_bbox_targets),
+    #         #                                           tf.stack([tf.range(tf.size(fg_inds)),
+    #         #                                                     tf.gather(labels, fg_inds)], axis=1), bbox_targets)
+	# 		final_bbox_targets = final_bbox_targets.numpy()
+	# 		bbox_targets = bbox_targets.numpy()
+	# 		for idx, fg_ind in enumerate(fg_inds.numpy()):
+	# 			final_bbox_targets[idx, labels[idx]] = bbox_targets[idx]
+
+	# 	final_bbox_targets = tf.reshape(final_bbox_targets, [-1, self._num_classes * 4])
+
+    #     # 这个好像没啥用
+	# 	bbox_outside_weights = tf.ones_like(bbox_inside_weights, dtype=tf.float32)
+	# 	return tf.stop_gradient(final_rois), tf.stop_gradient(final_labels), tf.stop_gradient(final_bbox_targets), \
+    #            tf.stop_gradient(bbox_inside_weights), tf.stop_gradient(bbox_outside_weights)

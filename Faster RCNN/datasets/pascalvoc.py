@@ -55,9 +55,9 @@ def get_dataset(tf_record_list,
 
 
     preprocessing_partial_func = partial(preprocessing_training_func,
-                                         min_size=min_size, max_size=max_size,
-                                         preprocessing_type=preprocessing_type,
-                                         caffe_pixel_means=caffe_pixel_means)
+                                        min_size=min_size, max_size=max_size,
+                                        preprocessing_type=preprocessing_type,
+                                        caffe_pixel_means=caffe_pixel_means)
 
     dataset = dataset.batch(batch_size=batch_size).map(preprocessing_partial_func)
 
@@ -71,19 +71,8 @@ def get_dataset(tf_record_list,
 
 # eval
 def get_dataset_by_local_file(mode, root_path, image_format='bgr',
-                              preprocessing_type='caffe', caffe_pixel_means=None,
-                              min_edge=600, max_edge=1000):
-    """
-    根据 /path/to/VOC2007 or VOC2012/ImageSets/Main/{}.txt 读取图片列表，读取图片
-    :param mode:
-    :param root_path:
-    :param image_format:
-    :param caffe_pixel_means: 
-    :param preprocessing_type:
-    :param min_edge: 
-    :param max_edge: 
-    :return: 
-    """
+                            preprocessing_type='caffe', caffe_pixel_means=None,
+                            min_edge=600, max_edge=1000):
     if image_format not in ['rgb', 'bgr']:
         raise ValueError('unknown image format {}'.format(image_format))
     with open(os.path.join(root_path, 'ImageSets', 'Main', '%s.txt' % mode), 'r') as f:
@@ -115,10 +104,10 @@ def get_dataset_by_local_file(mode, root_path, image_format='bgr',
 
     dataset = tf.data.Dataset.from_tensor_slices(examples_list).map(
         lambda example: tf.py_func(_map_from_cv2,
-                                   [example],
-                                   [tf.float32, tf.float64, tf.int64, tf.int64]  # linux
-                                   # [tf.float32, tf.float64, tf.int32, tf.int32]  # windows
-                                   )
+                                    [example],
+                                    [tf.float32, tf.float64, tf.int64, tf.int64]  # linux
+                                    # [tf.float32, tf.float64, tf.int32, tf.int32]  # windows
+                                    )
     ).batch(1)
 
     return dataset, examples_list
@@ -148,8 +137,8 @@ def _tf_preprocessing(image):
 
 
 def get_dataset_by_tf_records(mode, root_path,
-                              preprocessing_type='caffe', caffe_pixel_means=None,
-                              min_edge=600, max_edge=1000):
+                            preprocessing_type='caffe', caffe_pixel_means=None,
+                            min_edge=600, max_edge=1000):
     with open(os.path.join(root_path, 'ImageSets', 'Main', '%s.txt' % mode), 'r') as f:
         lines = f.readlines()
     examples_list = [line.strip() for line in lines]

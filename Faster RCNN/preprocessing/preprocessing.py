@@ -10,6 +10,7 @@ def _get_default_iaa_sequence():
     ]
 
 
+
 def image_argument_with_imgaug(image, bboxes, iaa_sequence=None):
     """
     增强一张图片
@@ -21,12 +22,11 @@ def image_argument_with_imgaug(image, bboxes, iaa_sequence=None):
                         float类型，取值范围[0, 1]
     :param iaa_sequence:
     :return:        图像增强结果，包括image和bbox，其格式与输入相同
-    """
+    """ 
     bboxes_list = []
     height, width, channels = image.shape
     for bbox in bboxes:
-        ymin, xmin, ymax, xmax = int(bbox[0] * height), int(bbox[1] * width), int(bbox[2] * height), int(
-            bbox[3] * width)
+        ymin, xmin, ymax, xmax = int(bbox[0] * height), int(bbox[1] * width), int(bbox[2] * height), int(bbox[3] * width)
         bboxes_list.append(ia.BoundingBox(x1=xmin, y1=ymin, x2=xmax, y2=ymax))
     bboxes_ia = ia.BoundingBoxesOnImage(bboxes_list, shape=image.shape)
 
@@ -50,30 +50,16 @@ def image_argument_with_imgaug(image, bboxes, iaa_sequence=None):
 
 
 def _caffe_preprocessing(image, pixel_means):
-    """
-    输入 uint8 RGB 的图像，转换为 tf.float32 BGR 格式，并减去 imagenet 平均数
-    :param image:
-    :return:
-    """
-
-    # 使用下面方法会碰到奇怪的问题：构建第二个 dataset 时报错
-    # AttributeError: 'Tensor' object has no attribute '_datatype_enum'
-    # return tf.keras.applications.vgg16.preprocess_input(image)
-
-    image = tf.to_float(image)
+    # 输入 uint8 RGB 的图像，转换为 tf.float32 BGR 格式，并减去 imagenet 平均数
+    image = tf.cast(image, tf.float32)
     image = tf.reverse(image, axis=[-1])
-    channels = tf.split(axis=-1, num_or_size_splits=3, value=image)
-    for i in range(3):
-        channels[i] -= pixel_means[i]
+    channels = tf.split(axis=-1, value=image, num_or_size_splits=3)
+    channels = [channels[i] - pixel_means[i] for i in range(3)]
     return tf.concat(axis=-1, values=channels)
 
 
 def _tf_preprocessing(image):
-    """
-    输入 uint8 RGB 的图像，转换为 tf.float32 RGB 格式，取值范围[-1, 1]
-    :param image:
-    :return:
-    """
+    # 输入 uint8 RGB 的图像，转换为 tf.float32 RGB 格式，取值范围[-1, 1]
     return tf.image.convert_image_dtype(image, dtype=tf.float32) * 2.0 - 1.0
 
 
@@ -83,16 +69,6 @@ def preprocessing_training_func(image, bboxes, height, width, labels,
     输入 rgb 图片，进行以下预处理
     1) 短边最短为 min_size，长边最长为 max_size，矛盾时，优先满足长边
     2) 通过 preprocessing_type 选择 preprocessing 函数
-    :param image:
-    :param bboxes:
-    :param width:
-    :param height:
-    :param labels:
-    :param max_size:
-    :param min_size:
-    :param preprocessing_type:
-    :param caffe_pixel_means:
-    :return:
     """
 
     if preprocessing_type == 'caffe':
@@ -101,23 +77,27 @@ def preprocessing_training_func(image, bboxes, height, width, labels,
         preprocessing_fn = _tf_preprocessing
     else:
         raise ValueError('unknown preprocessing type {}'.format(preprocessing_type))
+    
     image = preprocessing_fn(image)
+    height = tf.cast(height[0], dtype=tf.float32)
+    width = tf.cast(width[0], dtype=tf.float32)
 
-    height = tf.to_float(height[0])
-    width = tf.to_float(width[0])
-    scale1 = min_size / tf.minimum(height, width)
-    scale2 = max_size / tf.maximum(height, width)
-    scale = tf.minimum(scale1, scale2)
-    n_height = tf.to_int32(scale * height)
-    n_width = tf.to_int32(scale * width)
+    # 短边最短为 min_size，长边最长为 max_size．矛盾时，优先满足长边
+    min_scale = min_size / tf.minimum(height, width)
+    max_scale = max_size / tf.maximum(height, width)
+    scale = tf.minimum(min_scale, max_scale)
 
-    image = tf.image.resize_bilinear(image, (n_height, n_width))
+
+    height = tf.cast(scale * height, dtype=tf.int32)
+    width = tf.cast(scale * width, dtype=tf.int32)
+
+    image = tf.image.resize_bilinear(image, (height, width))
 
     channels = tf.split(axis=-1, num_or_size_splits=4, value=bboxes)
-    channels[0] = channels[0] * tf.to_float(n_height - 1)
-    channels[1] = channels[1] * tf.to_float(n_width - 1)
-    channels[2] = channels[2] * tf.to_float(n_height - 1)
-    channels[3] = channels[3] * tf.to_float(n_width - 1)
+    channels[0] = channels[0] * tf.cast(height, dtype=tf.float32)
+    channels[1] = channels[1] * tf.cast(width, dtype=tf.float32)
+    channels[2] = channels[2] * tf.cast(height, dtype=tf.float32)
+    channels[3] = channels[3] * tf.cast(width, dtype=tf.float32)
     bboxes = tf.concat(channels, axis=-1)
 
     return image, bboxes, labels

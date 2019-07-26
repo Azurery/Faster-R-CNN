@@ -35,25 +35,8 @@ import tensorflow as tf
 # 	return anchors
 
 
-def generate_anchors_base_tf(anchor_base, feat_stride, height, width):
-    shift_x = tf.range(width) * feat_stride  # width
-    shift_y = tf.range(height) * feat_stride  # height
-    shift_x, shift_y = tf.meshgrid(shift_x, shift_y)
-    sx = tf.reshape(shift_x, shape=(-1,))
-    sy = tf.reshape(shift_y, shape=(-1,))
-    shifts = tf.transpose(tf.stack([sx, sy, sx, sy]))
-
-    K = tf.multiply(width, height)
-    A = anchor_base.shape[0]
-    shifts = tf.transpose(tf.reshape(shifts, shape=[1, K, 4]), perm=(1, 0, 2))
-    anchor_constant = tf.to_float(tf.reshape(anchor_base, (1, A, 4)))
-    anchors_tf = tf.reshape(tf.add(anchor_constant, tf.to_float(shifts)), shape=(-1, 4))
-
-    return tf.cast(anchors_tf, dtype=tf.float32)
-
-
-def generate_anchors(feature_map_width, feature_map_height, base_anchor_size=16, anchor_ratios=[0.5, 1, 2], anchor_steps=[8, 16, 32],
-					):
+def generate_anchors(feature_map_width, feature_map_height, base_anchor_size, 
+					feature_stride, anchor_ratios, anchor_steps):
 	'''
 	此函数决定了最终 anchors 的长宽，后续 generate_by_anchor_base 函数的作用是确定anchor的中心点
     输入的三个参数都会影响到最终的长宽：
@@ -87,7 +70,7 @@ def generate_anchors(feature_map_width, feature_map_height, base_anchor_size=16,
 	# 		   [128.     , 256.     , 512.     ],
 	# 		   [ 90.50967, 181.01933, 362.03867]], dtype=float32)>)
 	anchors_w = base_anchors[:, 2] / sqrt_ratios
-	anchors_h = base_anchors[:, 3] / sqrt_ratios
+	anchors_h = base_anchors[:, 3] * sqrt_ratios
 
 	# reshape之后,变成[9, 1]矩阵
 	# array([[181.01933],
@@ -105,8 +88,8 @@ def generate_anchors(feature_map_width, feature_map_height, base_anchor_size=16,
 	# 一张feature map一共有feature_map_width*feature_map_height个点，而由于每个点
 	# 又有９个anchors,所以每个点都需要９个相同的坐标
 	# 下面用于先生成feature_map_width*feature_map_height个点
-	x, y = tf.meshgrid(tf.range(feature_map_width, dtype=tf.float32),
-					tf.range(feature_map_height, dtype=tf.float32))
+	x, y = tf.meshgrid(tf.range(feature_map_width, dtype=tf.float32) * feature_stride,
+					tf.range(feature_map_height, dtype=tf.float32) * feature_stride)
 	
 	# shape为[9, feature_map_width]
 	anchors_w, x = tf.meshgrid(anchors_w, x)
@@ -118,6 +101,7 @@ def generate_anchors(feature_map_width, feature_map_height, base_anchor_size=16,
 
 	anchors_wh = tf.reshape(tf.stack([anchors_w, anchors_h], axis=2), [-1, 2])
 	anchors = tf.concat([anchors_xy - 0.5 * anchors_wh, anchors_xy + 0.5 * anchors_wh], axis=1)
+	# print(anchors)
 	return anchors
 
 def encode_bboxes(src_bboxes, dst_bboxes):
@@ -150,9 +134,9 @@ def decode_bboxes(bboxes, rpn_coordinates):
 
 	转换公式为：
 		`\\hat{g}_y = p_h t_y + p_y`
-    	`\\hat{g}_x = p_w t_x + p_x`
-    	`\\hat{g}_h = p_h \\exp(t_h)`
-    	`\\hat{g}_w = p_w \\exp(t_w)`
+		`\\hat{g}_x = p_w t_x + p_x`
+		`\\hat{g}_h = p_h \\exp(t_h)`
+		`\\hat{g}_w = p_w \\exp(t_w)`
 	'''
 	if bboxes.get_shape().as_list()[0] == 0:
 		return np.zeros((0, 4), dtype=rpn_coordinates.dtype)
@@ -219,10 +203,9 @@ def filter_overlap_bboxes(anchors, image_shape):
 			tf.logical_and((anchors[:, 2] <= image_shape[0].numpy()), (anchors[:, 3] <= image_shape[1].numpy()))
 		)
 	)[:, 0]
-
+	
 	filtered_bboxes = tf.gather(anchors, filtered_indicies)
 	return filtered_indicies, filtered_bboxes
-
 
 # FIXME：感觉这么写可读性比较差，虽然形式比较简单
 # 最后还是应该改写成遍历的形式
@@ -245,6 +228,7 @@ def pairwise_iou(anchors, gt_bboxes):
 
 	anchors = tf.cast(anchors, tf.float32)
 	gt_bboxes = tf.cast(gt_bboxes, tf.float32)
+	# print('gt_bboxes:', gt_bboxes)
 
 	# `anchors` 的 shape：`[num_anchors, 4]`
 	# 下面这么做的目的：是为了得到 `anchors` 中每一个 anchor 的坐标，以及
@@ -277,8 +261,12 @@ def pairwise_iou(anchors, gt_bboxes):
 
 	anchor_areas = _intersection_area(anchors)
 	gt_areas = _intersection_area(gt_bboxes)
+	# print('gt_areas:', gt_areas)
+	
 	unions = (tf.expand_dims(anchor_areas, 1) + tf.expand_dims(gt_areas, 0) - intersections)
-	iou = tf.truediv(intersections, unions)
+	iou = tf.where(tf.equal(intersections, 0.0),
+					tf.zeros_like(intersections),
+					tf.truediv(intersections, unions))
 	return iou
 
 

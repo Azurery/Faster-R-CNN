@@ -8,49 +8,11 @@ from utils.proposals_utils import rpn_head_creator, rpn_proposals_creator, rpn_t
 from utils.roi_pooling_utils import roi_pooling_creator
 from utils.bbox_utils import generate_anchors
 from utils.loss_utils import rpn_losses_creator, roi_losses_creator
-
-# learning rate flags
-tf.app.flags.DEFINE_float(
-	'weight_decay', 0.0001, 'The weight decay on the model weights.')
-
-
-FLAGS = tf.app.flags.FLAGS
-
-faster_rcnn_parameters = namedtuple('faster_rcnn_parameters',
-									['num_classes',
-									'weight_decay',
-									'aspect_ratios',
-									'anchor_sizes',
-									'feature_stride',
-
-									# rpn proposals 参数
-									'rpn_proposals_nms_threshold',
-									'rpn_proposals_num_pre_nms_train',
-									'rpn_proposals_num_post_nms_train',
-									'rpn_proposals_num_pre_nms_test',
-									'rpn_proposals_num_post_nms_test',
-
-									# rpn target anchors 参数
-									'rpn_target_anchors_positive_iou_threshold',
-									'rpn_target_anchors_negative_iou_threshold',
-									'rpn_target_anchors_total_samples',
-									'rpn_target_anchors_max_positive_samples',
-									
-									# roi pooling 参数
-									'roi_pooling_size',
-									'roi_pooling_max_pooling',
-
-									'roi_training_positive_iou_threshold',
-									'roi_training_negative_iou_threshold',
-									'roi_training_total_num_samples',
-									'roi_training_max_positive_samples'
-
-									# prediction 参数
-									])
-
+from utils.anchors_generator import generate_by_anchor_base_tf, generate_anchor_base
+from utils.proposal_target import ProposalTarget
 
 class faster_rcnn_base(tf.keras.Model):
-	def __init__(self, num_classes, weight_decay, aspect_ratios, anchor_sizes,feature_stride, 
+	def __init__(self, num_classes, weight_decay, aspect_ratios, anchor_steps,feature_stride, 
 				rpn_proposals_nms_threshold, 
 				rpn_proposals_num_pre_nms_train,
 				rpn_proposals_num_post_nms_train, 
@@ -70,9 +32,9 @@ class faster_rcnn_base(tf.keras.Model):
 		self._num_classes = num_classes
 		self._weight_decay = weight_decay
 		self._aspect_ratios = aspect_ratios
-		self._anchor_sizes = anchor_sizes
+		self._anchor_steps = anchor_steps
 		self._feature_stride = feature_stride
-		self._num_anchors = len(self._aspect_ratios) * len(self._anchor_sizes)
+		self._num_anchors = len(self._aspect_ratios) * len(self._anchor_steps)
 
 		self._rpn_proposals_nms_threshold = rpn_proposals_nms_threshold
 		self._rpn_proposals_num_pre_nms_train = rpn_proposals_num_pre_nms_train
@@ -96,6 +58,9 @@ class faster_rcnn_base(tf.keras.Model):
 		self._roi_training_total_num_samples = roi_training_total_num_samples
 		self._roi_training_max_positive_samples = roi_training_max_positive_samples
 
+
+		self._anchor_generator = generate_by_anchor_base_tf
+		self._anchor_base = tf.to_float(generate_anchor_base(self._feature_stride, self._aspect_ratios, self._anchor_steps))
 		# 创建 Faster R-CNN 的基础组件
 
 		# 创建 Feature Extractor
@@ -137,6 +102,12 @@ class faster_rcnn_base(tf.keras.Model):
 																		negative_iou_threshold=self._roi_training_negative_iou_threshold,
 																		num_samples=self._roi_training_total_num_samples,
 																		max_positive_samples=self._roi_training_max_positive_samples)
+	ProposalTarget
+		# self._roi_target_proposals_creator = roi_target_proposals_createor(num_classes=self._num_classes, 
+		# 																positive_iou_threshold=self._roi_training_positive_iou_threshold,
+		# 																negative_iou_threshold=self._roi_training_negative_iou_threshold,
+		# 																num_samples=self._roi_training_total_num_samples,
+		# 																max_positive_samples=self._roi_training_max_positive_samples)
 	
 	def call(self, inputs, training=None):
 		if training:
@@ -147,27 +118,53 @@ class faster_rcnn_base(tf.keras.Model):
 		image_shape = image.get_shape().as_list()[1:3]
 		# print('image_shape', image_shape)
 		
-		# tf.logging.debug('Image shape is {}'.format(image_shape))
+		tf.logging.info('image shape is {}'.format(image_shape))
 
 		feature_maps = self._feature_extractor_creator(image, training=training)
 		self._feature_maps_shape = feature_maps.get_shape().as_list()[1:3]
-		# tf.logging.debug('Feature maps shape is {}'.format(feature_maps_shape))
+		# tf.logging.info('Feature maps shape is {}'.format(feature_maps_shape))
 
-		# FIXEME：没有写完
 		# 在 feature maps 上产生大约 2w 个 anchors
-		anchors = generate_anchors(self._feature_maps_shape[0], self._feature_maps_shape[1])
+		# anchors = generate_anchors(self._feature_maps_shape[0], self._feature_maps_shape[1], base_anchor_size=16, 
+		# 						feature_stride=self._feature_stride, anchor_ratios=self._aspect_ratios, anchor_steps=self._anchor_steps)
 
-		tf.logging.info('Totoally generates {} anchors.'.format(anchors.shape[0]))
+		anchors = self._anchor_generator(self._anchor_base, self._feature_stride,
+                                        tf.to_int32(tf.ceil(image_shape[0] / self._feature_stride)),
+                                        tf.to_int32(tf.ceil(image_shape[1] / self._feature_stride)))
 
-		# `[H * W * 18]`  `[H * W * 36]`
+		tf.logging.info('totoally generates {} anchors.'.format(anchors.shape[0]))
+
+		# `[H * W, 18]`  `[H * W, 4]`
 		rpn_scores, rpn_coordinates = self._rpn_head_creator(feature_maps)
+
+		# `[H * W, 18]` ---> `[H * W, 2, 9]`
+		scores = tf.reshape(rpn_scores, [-1, 2, self._num_anchors])
+
+		# `[H * W, 2, 9]` ---> `[H * W, 9, 2]`
+		scores = tf.transpose(scores, [0, 2, 1])
+		
+		# `[H * W, 9, 2]` ---> `[H * W * 9, 2]`
+		scores = tf.reshape(scores, [-1, 2])
+
+		#  ---> `[H * W * 9, 2]`
+		scores = tf.nn.softmax(scores)
+		scores = tf.reshape(scores, [-1, self._num_anchors, 2])
+
+		# `[H * W * 9, 2]`---> `[H * W, 2, 9]`
+		scores = tf.transpose(scores, [0, 2, 1])
+		
+		# `[H * W, 2, 9]`---> `[H * W, 18]`
+		scores = tf.reshape(scores, [-1, 2 * self._num_anchors])
+
+		# `[H * W, 18]`---> `[H * W * 18]`
+		# 这个操作骚啊，没看懂
+		scores = tf.reshape(scores[:, self._num_anchors:], [-1])
 
 		# 其实就是 proposal layer
 		# 主要是将经过 RPN Head 的 fg/bg 分类结果 和 经过 reg 的偏移值结果传入
 		# 用于生成进入 RoI Pooling layer 的 proposals
-		rpn_proposals = self._rpn_proposals_creator((rpn_scores, rpn_coordinates, anchors, image_shape), 
+		rpn_proposals = self._rpn_proposals_creator((scores, rpn_coordinates, anchors, image_shape), 
 												training=training)
-
 		if training:
 			# 从 `20000` 多个候选的 anchors 选出 `256` 个 anchors 进行分类和回归位置。
 			rpn_labels, rpn_target_anchors, rpn_w_in, rpn_w_out = \
@@ -189,8 +186,9 @@ class faster_rcnn_base(tf.keras.Model):
 													training=training)
 			roi_scores, roi_coordinates = self._roi_head_creator(roi_features, training=training)	
 
-			roi_cls_loss, roi_reg_loss = roi_losses_creator(roi_scores, roi_coordinates, final_roi_labels,
-															final_roi_target_bboxes, roi_w_in, roi_w_out)				
+			roi_cls_loss, roi_reg_loss = roi_losses_creator(roi_scores, roi_coordinates, 
+															final_roi_labels, final_roi_target_bboxes, 
+															roi_w_in, roi_w_out)				
 			return rpn_cls_loss, rpn_reg_loss, roi_cls_loss, roi_reg_loss
 
 	def roi_head_creator(self):
